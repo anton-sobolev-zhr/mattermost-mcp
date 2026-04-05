@@ -1,0 +1,25 @@
+{
+  "name": "mattermost-mcp-server",
+  "version": "1.1.0",
+  "description": "Mattermost MCP server for npx",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mattermost-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepare": "npm run build"
+  },
+  "keywords": ["mcp", "mattermost"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
