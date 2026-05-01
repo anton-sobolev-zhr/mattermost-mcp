@@ -41,4 +41,5 @@ npx github:anton-sobolev-zhr/mattermost-mcp
 - `list_channels` — list channels in team
 - `get_user` — get user info by ID
 - `send_message` — send message to channel
+- `get_unread` — get unread messages, threads, and channel summary
 - `test_connection` — test Mattermost connection

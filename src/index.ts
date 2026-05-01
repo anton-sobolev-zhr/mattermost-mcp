@@ -262,6 +262,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {},
         },
       },
+      {
+        name: "get_unread",
+        description: "Get unread messages, threads and channels summary",
+        inputSchema: {
+          type: "object",
+          properties: {
+            team_id: {
+              type: "string",
+              description: "Team ID (optional, defaults to first team)",
+            },
+            include_threads: {
+              type: "boolean",
+              description: "Include collapsed reply threads (default: true)",
+              default: true,
+            },
+            include_channels: {
+              type: "boolean",
+              description: "Include channel unread summary (default: true)",
+              default: true,
+            },
+            limit: {
+              type: "number",
+              description: "Max channels/threads to show (default: 20)",
+              default: 20,
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -418,6 +446,162 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         return { content: [{ type: "text", text: `Connection failed: HTTP ${status}` }] };
+      }
+
+      case "get_unread": {
+        const teamIdOpt = z.string().optional().parse(args?.team_id);
+        const includeThreads = z.boolean().default(true).parse(args?.include_threads ?? true);
+        const includeChannels = z.boolean().default(true).parse(args?.include_channels ?? true);
+        const limit = z.number().default(20).parse(args?.limit ?? 20);
+
+        const { status: uStatus, data: me } = await apiGet("/users/me");
+        if (uStatus !== 200) {
+          return { content: [{ type: "text", text: `Error loading current user: HTTP ${uStatus}` }] };
+        }
+        const myId = me.id;
+
+        const { status: teamsStatus, data: teams } = await apiGet("/users/me/teams");
+        if (teamsStatus !== 200) {
+          return { content: [{ type: "text", text: `Error loading teams: HTTP ${teamsStatus}` }] };
+        }
+        if (!teams || teams.length === 0) {
+          return { content: [{ type: "text", text: "No teams found" }] };
+        }
+
+        const { status: unreadStatus, data: unreadTeams } = await apiGet("/users/me/teams/unread");
+        if (unreadStatus !== 200) {
+          return {
+            content: [{ type: "text", text: `Error loading unread team summary: HTTP ${unreadStatus}` }],
+          };
+        }
+        const unreadTeamsMap = new Map<string, any>(
+          Array.isArray(unreadTeams) ? unreadTeams.map((item: any) => [item.team_id, item]) : []
+        );
+
+        const targetTeams = teamIdOpt
+          ? teams.filter((t: any) => t.id === teamIdOpt)
+          : teams;
+        if (teamIdOpt && targetTeams.length === 0) {
+          return { content: [{ type: "text", text: `Team not found: ${teamIdOpt}` }] };
+        }
+
+        const parts: string[] = [];
+
+        for (const team of targetTeams) {
+          const teamLines: string[] = [];
+          const teamName = team.display_name || team.name;
+          const teamUnread = unreadTeamsMap.get(team.id);
+
+          if (includeChannels) {
+            const { status: chStatus, data: channels } = await apiGet(
+              `/users/me/teams/${team.id}/channels`
+            );
+
+            if (chStatus !== 200) {
+              teamLines.push(`Channels: Error HTTP ${chStatus}`);
+            } else {
+              const { status: membersStatus, data: members } = await apiGet(
+                `/users/${myId}/teams/${team.id}/channels/members`
+              );
+              if (membersStatus !== 200) {
+                teamLines.push(`Channel members: Error HTTP ${membersStatus}`);
+              } else {
+                const membersMap = new Map<string, any>();
+                if (Array.isArray(members)) {
+                  for (const m of members) {
+                    membersMap.set(m.channel_id, m);
+                  }
+                }
+
+                const unreadChannels: string[] = [];
+                let totalUnread = 0;
+                let totalUnreadRoot = 0;
+                let totalMentions = 0;
+
+                for (const ch of channels) {
+                  const mem = membersMap.get(ch.id);
+                  const unread = Math.max(
+                    0,
+                    (ch.total_msg_count || 0) - (mem?.msg_count || 0)
+                  );
+                  const unreadRoot = Math.max(
+                    0,
+                    (ch.total_msg_count_root || 0) - (mem?.msg_count_root || 0)
+                  );
+                  const mentions = (mem?.mention_count || 0) + (mem?.mention_count_root || 0);
+
+                  if (unread > 0 || unreadRoot > 0 || mentions > 0) {
+                    totalUnread += unread;
+                    totalUnreadRoot += unreadRoot;
+                    totalMentions += mentions;
+                    const typeTag: Record<string, string> = { O: "#", D: "@", G: "@", P: "@" };
+                    const tag = typeTag[ch.type] || "";
+                    const unreadInfo = [];
+                    if (unread > 0) unreadInfo.push(`${unread} unread`);
+                    if (unreadRoot > 0) unreadInfo.push(`${unreadRoot} root`);
+                    if (mentions > 0) unreadInfo.push(`${mentions} mentions`);
+                    unreadChannels.push(
+                      `${tag}${ch.display_name} (${ch.name}) — ${unreadInfo.join(", ")}`
+                    );
+                  }
+                }
+
+                if (unreadChannels.length > 0) {
+                  const summaryBits = [
+                    `${teamUnread?.msg_count ?? totalUnread} unread`,
+                    `${teamUnread?.mention_count ?? totalMentions} mentions`,
+                  ];
+                  if (totalUnreadRoot > 0) {
+                    summaryBits.push(`${totalUnreadRoot} root`);
+                  }
+                  teamLines.push(`Team "${teamName}" (${team.id}): ${summaryBits.join(", ")}`);
+                  teamLines.push(...unreadChannels.slice(0, limit));
+                  if (unreadChannels.length > limit) {
+                    teamLines.push(`  ... and ${unreadChannels.length - limit} more channels`);
+                  }
+                } else {
+                  teamLines.push(`Team "${teamName}": no unread`);
+                }
+              }
+            }
+          }
+
+          if (includeThreads) {
+            const { status: tStatus, data: threadData } = await apiGet(
+              `/users/me/teams/${team.id}/threads?unread=true&per_page=${limit}`
+            );
+
+            if (tStatus !== 200) {
+              teamLines.push(`Threads: Error HTTP ${tStatus}`);
+            } else {
+              const total = threadData.total || 0;
+              const totalUnreadThreads = threadData.total_unread_threads || 0;
+              teamLines.push(`Threads in "${teamName}": ${totalUnreadThreads} unread of ${total} total`);
+
+              const threads = threadData.threads || [];
+              for (const thr of threads) {
+                const preview = (thr.post?.message || "").substring(0, 80);
+                const unreadReplies = thr.unread_replies || 0;
+                const unreadMentions = thr.unread_mentions || 0;
+                const info = [];
+                if (unreadReplies > 0) info.push(`${unreadReplies} replies`);
+                if (unreadMentions > 0) info.push(`${unreadMentions} mentions`);
+                teamLines.push(
+                  `  Thread ${thr.id}: ${preview || "(no preview)"}${info.length > 0 ? ` [${info.join(", ")}]` : ""}`
+                );
+              }
+            }
+          }
+
+          if (parts.length > 0 && teamLines.length > 0) {
+            parts.push("");
+          }
+          parts.push(...teamLines);
+        }
+
+        return {
+          content: [{ type: "text", text: parts.join("\n") || "No unread" }],
+        };
       }
 
       default:
